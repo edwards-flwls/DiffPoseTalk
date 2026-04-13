@@ -63,7 +63,15 @@ You can also pass `--dtr 0.99` to enable dynamic thresholding to obtain results 
 Here are some examples:
 
 ```shell
-python demo.py --exp_name head-SA-hubert-WM --iter 110000 -a demo/input/audio/FAST.flac -c demo/input/coef/TH217.npy -s demo/input/style/TH217.npy -o TH217-FAST-TH217.mp4 -n 3 -ss 3 -sa 1.15 -dtr 0.99
+python demo.py \
+--exp_name head-SA-hubert-WM \
+--iter 110000 \
+-a demo/input/audio/FAST.flac \
+-c demo/input/coef/TH217.npy \
+-s demo/input/style/TH217.npy \
+-o TH217-FAST-TH217.mp4 \
+-n 3 -ss 3 -sa 1.15 -dtr 0.99 \
+--coef_stats models/data/stats_train.npz
 
 # inference SA-hubert-WM 
 python demo.py \
