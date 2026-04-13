@@ -1,21 +1,27 @@
-from packaging import version
+from __future__ import annotations
+
 from typing import Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import transformers
-from transformers import Wav2Vec2Model
+from packaging import version
+from transformers import Wav2Vec2Model as _Wav2Vec2ModelBase
 from transformers.modeling_outputs import BaseModelOutput
 
-_CONFIG_FOR_DOC = 'Wav2Vec2Config'
+# The implementation of Wav2Vec2Model is borrowed from
+# https://huggingface.co/transformers/_modules/transformers/models/wav2vec2/modeling_wav2vec2.html
+# We initialize the encoder with pre-trained wav2vec 2.0 weights.
 
 
-# the implementation of Wav2Vec2Model is borrowed from
-# https://huggingface.co/transformers/_modules/transformers/models/wav2vec2/modeling_wav2vec2.html#Wav2Vec2Model
-# initialize our encoder with the pre-trained wav2vec 2.0 weights.
-def _compute_mask_indices(shape: Tuple[int, int], mask_prob: float, mask_length: int,
-                          attention_mask: Optional[torch.Tensor] = None, min_masks: int = 0, ) -> np.ndarray:
+def _compute_mask_indices(
+    shape: Tuple[int, int],
+    mask_prob: float,
+    mask_length: int,
+    attention_mask: Optional[torch.Tensor] = None,
+    min_masks: int = 0,
+) -> np.ndarray:
     bsz, all_sz = shape
     mask = np.full((bsz, all_sz), False)
 
@@ -42,7 +48,11 @@ def _compute_mask_indices(shape: Tuple[int, int], mask_prob: float, mask_length:
             min_len = sz - num_mask - 1
 
         mask_idc = np.random.choice(sz - min_len, num_mask, replace=False)
-        mask_idc = np.asarray([mask_idc[j] + offset for j in range(len(mask_idc)) for offset in range(lengths[j])])
+        mask_idc = np.asarray([
+            mask_idc[j] + offset
+            for j in range(len(mask_idc))
+            for offset in range(lengths[j])
+        ])
         mask_idcs.append(np.unique(mask_idc[mask_idc < sz]))
 
     min_len = min([len(m) for m in mask_idcs])
@@ -53,31 +63,57 @@ def _compute_mask_indices(shape: Tuple[int, int], mask_prob: float, mask_length:
     return mask
 
 
-# linear interpolation layer
-def linear_interpolation(features, input_fps, output_fps, output_len=None):
-    # features: (N, C, L)
+def linear_interpolation(
+    features: torch.Tensor,
+    input_fps: int,
+    output_fps: int,
+    output_len: int | None = None,
+) -> torch.Tensor:
+    """Linearly interpolate features from input_fps to output_fps.
+
+    Args:
+        features: (N, C, L)
+        input_fps: source frame rate
+        output_fps: target frame rate
+        output_len: optional explicit output length
+
+    Returns:
+        torch.Tensor: (N, C, output_len)
+    """
     seq_len = features.shape[2] / float(input_fps)
     if output_len is None:
         output_len = int(seq_len * output_fps)
-    output_features = F.interpolate(features, size=output_len, align_corners=False, mode='linear')
-    return output_features
+    return F.interpolate(features, size=output_len, align_corners=False, mode='linear')
 
 
-class Wav2Vec2Model(Wav2Vec2Model):
-    def __init__(self, config):
+class Wav2Vec2Model(_Wav2Vec2ModelBase):
+    def __init__(self, config: object) -> None:
         super().__init__(config)
         self.is_old_version = version.parse(transformers.__version__) < version.parse('4.7.0')
 
-    def forward(self, input_values, output_fps=25, attention_mask=None, output_attentions=None,
-                output_hidden_states=None, return_dict=None, frame_num=None):
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        output_fps: int = 25,
+        attention_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        frame_num: int | None = None,
+    ) -> BaseModelOutput | tuple:
         self.config.output_attentions = True
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions if output_attentions is not None else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states)
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         hidden_states = self.feature_extractor(input_values)  # (N, C, L)
-        # Resample the audio feature @ 50 fps to `output_fps`.
+        # Resample audio features @ 50 fps to `output_fps`
         if frame_num is not None:
             hidden_states_len = round(frame_num * 50 / output_fps)
             hidden_states = hidden_states[:, :, :hidden_states_len]
@@ -86,9 +122,17 @@ class Wav2Vec2Model(Wav2Vec2Model):
 
         if attention_mask is not None:
             output_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1))
-            attention_mask = torch.zeros(hidden_states.shape[:2], dtype=hidden_states.dtype,
-                                         device=hidden_states.device)
-            attention_mask[(torch.arange(attention_mask.shape[0], device=hidden_states.device), output_lengths - 1)] = 1
+            attention_mask = torch.zeros(
+                hidden_states.shape[:2],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            attention_mask[
+                (
+                    torch.arange(attention_mask.shape[0], device=hidden_states.device),
+                    output_lengths - 1,
+                )
+            ] = 1
             attention_mask = attention_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
 
         if self.is_old_version:
@@ -99,21 +143,38 @@ class Wav2Vec2Model(Wav2Vec2Model):
         if self.config.apply_spec_augment and self.training:
             batch_size, sequence_length, hidden_size = hidden_states.size()
             if self.config.mask_time_prob > 0:
-                mask_time_indices = _compute_mask_indices((batch_size, sequence_length), self.config.mask_time_prob,
-                                                          self.config.mask_time_length, attention_mask=attention_mask,
-                                                          min_masks=2, )
-                hidden_states[torch.from_numpy(mask_time_indices)] = self.masked_spec_embed.to(hidden_states.dtype)
+                mask_time_indices = _compute_mask_indices(
+                    (batch_size, sequence_length),
+                    self.config.mask_time_prob,
+                    self.config.mask_time_length,
+                    attention_mask=attention_mask,
+                    min_masks=2,
+                )
+                hidden_states[torch.from_numpy(mask_time_indices)] = self.masked_spec_embed.to(
+                    hidden_states.dtype
+                )
             if self.config.mask_feature_prob > 0:
-                mask_feature_indices = _compute_mask_indices((batch_size, hidden_size), self.config.mask_feature_prob,
-                                                             self.config.mask_feature_length, )
+                mask_feature_indices = _compute_mask_indices(
+                    (batch_size, hidden_size),
+                    self.config.mask_feature_prob,
+                    self.config.mask_feature_length,
+                )
                 mask_feature_indices = torch.from_numpy(mask_feature_indices).to(hidden_states.device)
                 hidden_states[mask_feature_indices[:, None].expand(-1, sequence_length, -1)] = 0
-        encoder_outputs = self.encoder(hidden_states, attention_mask=attention_mask,
-                                       output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-                                       return_dict=return_dict, )
+
+        encoder_outputs = self.encoder(
+            hidden_states,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
         hidden_states = encoder_outputs[0]
         if not return_dict:
             return (hidden_states,) + encoder_outputs[1:]
 
-        return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=encoder_outputs.hidden_states,
-                               attentions=encoder_outputs.attentions, )
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )

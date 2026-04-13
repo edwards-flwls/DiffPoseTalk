@@ -1,28 +1,34 @@
+from __future__ import annotations
+
+from typing import Any
+
+import torch
 import torch.nn as nn
 
 from .common import PositionalEncoding
 
 
 class StyleEncoder(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args: Any) -> None:
         super().__init__()
 
-        # Model parameters
         self.motion_coef_dim = 50
         if args.rot_repr == 'aa':
             self.motion_coef_dim += 1 if args.no_head_pose else 4
         else:
             raise ValueError(f'Unknown rotation representation {args.rot_repr}!')
 
-        self.feature_dim = args.feature_dim
-        self.n_heads = args.n_heads
-        self.n_layers = args.n_layers
-        self.mlp_ratio = args.mlp_ratio
+        self.feature_dim: int = args.feature_dim
+        self.n_heads: int = args.n_heads
+        self.n_layers: int = args.n_layers
+        self.mlp_ratio: int = args.mlp_ratio
 
-        # Transformer for feature extraction
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.feature_dim, nhead=self.n_heads, dim_feedforward=self.mlp_ratio * self.feature_dim,
-            activation='gelu', batch_first=True
+            d_model=self.feature_dim,
+            nhead=self.n_heads,
+            dim_feedforward=self.mlp_ratio * self.feature_dim,
+            activation='gelu',
+            batch_first=True,
         )
 
         self.PE = PositionalEncoding(self.feature_dim)
@@ -32,23 +38,19 @@ class StyleEncoder(nn.Module):
         })
 
     @property
-    def device(self):
+    def device(self) -> torch.device:
         return next(self.parameters()).device
 
-    def forward(self, motion_coef):
+    def forward(self, motion_coef: torch.Tensor) -> torch.Tensor:
         """
-        :param motion_coef: (batch_size, seq_len, motion_coef_dim)
-        :param audio: (batch_size, seq_len)
-        :return: (batch_size, feature_dim)
-        """
-        batch_size, seq_len, _ = motion_coef.shape
+        Args:
+            motion_coef: (batch_size, seq_len, motion_coef_dim)
 
-        # Motion
+        Returns:
+            torch.Tensor: (batch_size, feature_dim)
+        """
         motion_feat = self.encoder['motion_proj'](motion_coef)
         motion_feat = self.PE(motion_feat)
-
         feat = self.encoder['transformer'](motion_feat)  # (N, L, feat_dim)
-
-        feat = feat.mean(dim=1)  # Pooling to (N, feat_dim)
-
+        feat = feat.mean(dim=1)  # Pool to (N, feat_dim)
         return feat
